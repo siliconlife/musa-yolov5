@@ -111,13 +111,24 @@ def device_count():
         return 0
 
 
-def select_device(device="", batch_size=0, newline=True):
-    """Selects computing device (CPU, CUDA GPU, MPS) for YOLOv5 model deployment, logging device info."""
+torch_musa_available = False
+try:
+    import torch_musa
+    torch_musa_available = True
+except ImportError:
+    pass
+
+def select_device(device="musa", batch_size=0, newline=True):
+    """Selects computing device (CPU, CUDA GPU, MPS, MUSA) for YOLOv5 model deployment, logging device info."""
     s = f"YOLOv5 🚀 {git_describe() or file_date()} Python-{platform.python_version()} torch-{torch.__version__} "
+    if torch_musa_available:
+        device = "musa"
     device = str(device).strip().lower().replace("cuda:", "").replace("none", "")  # to string, 'cuda:0' to '0'
     cpu = device == "cpu"
     mps = device == "mps"  # Apple Metal Performance Shaders (MPS)
-    if cpu or mps:
+    musa = device.startswith("musa")  # MUSA GPU
+
+    if cpu or mps or musa:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # force torch.cuda.is_available() = False
     elif device:  # non-cpu device requested
         os.environ["CUDA_VISIBLE_DEVICES"] = device  # set environment variable - must be before assert is_available()
@@ -125,7 +136,7 @@ def select_device(device="", batch_size=0, newline=True):
             device.replace(",", "")
         ), f"Invalid CUDA '--device {device}' requested, use '--device cpu' or pass valid CUDA device(s)"
 
-    if not cpu and not mps and torch.cuda.is_available():  # prefer GPU if available
+    if not cpu and not mps and not musa and torch.cuda.is_available():  # prefer GPU if available
         devices = device.split(",") if device else "0"  # range(torch.cuda.device_count())  # i.e. 0,1,6,7
         n = len(devices)  # device count
         if n > 1 and batch_size > 0:  # check batch_size is divisible by device_count
@@ -138,6 +149,9 @@ def select_device(device="", batch_size=0, newline=True):
     elif mps and getattr(torch, "has_mps", False) and torch.backends.mps.is_available():  # prefer MPS if available
         s += "MPS\n"
         arg = "mps"
+    elif musa and torch_musa_available:  # prefer MUSA if available
+        s += "MUSA\n"
+        arg = "musa"
     else:  # revert to CPU
         s += "CPU\n"
         arg = "cpu"
