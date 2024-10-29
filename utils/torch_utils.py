@@ -111,30 +111,50 @@ def device_count():
         return 0
 
 
+has_musa = False
+try:
+    import torch_musa
+    has_musa = True
+except ImportError:
+    pass
+
 def select_device(device="", batch_size=0, newline=True):
-    """Selects computing device (CPU, CUDA GPU, MPS) for YOLOv5 model deployment, logging device info."""
+    """Selects computing device (CPU, CUDA/MUSA GPU, MPS) for YOLOv5 model deployment, logging device info."""
     s = f"YOLOv5 🚀 {git_describe() or file_date()} Python-{platform.python_version()} torch-{torch.__version__} "
-    device = str(device).strip().lower().replace("cuda:", "").replace("none", "")  # to string, 'cuda:0' to '0'
+    device = str(device).strip().lower().replace("musa:" if has_musa else "cuda:", "").replace("none", "")  # to string, 'cuda:0' to '0'
     cpu = device == "cpu"
     mps = device == "mps"  # Apple Metal Performance Shaders (MPS)
     if cpu or mps:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # force torch.cuda.is_available() = False
     elif device:  # non-cpu device requested
-        os.environ["CUDA_VISIBLE_DEVICES"] = device  # set environment variable - must be before assert is_available()
-        assert torch.cuda.is_available() and torch.cuda.device_count() >= len(
-            device.replace(",", "")
-        ), f"Invalid CUDA '--device {device}' requested, use '--device cpu' or pass valid CUDA device(s)"
+        if has_musa:
+            os.environ["MUSA_VISIBLE_DEVICES"] = device  # set environment variable - must be before assert is_available()
+            assert torch.musa.is_available() and torch.musa.device_count() >= len(
+                device.replace(",", "")
+            ), f"Invalid MUSA '--device {device}' requested, use '--device cpu' or pass valid MUSA device(s)"
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = device  # set environment variable - must be before assert is_available()
+            assert torch.cuda.is_available() and torch.cuda.device_count() >= len(
+                device.replace(",", "")
+            ), f"Invalid CUDA '--device {device}' requested, use '--device cpu' or pass valid CUDA device(s)"
 
-    if not cpu and not mps and torch.cuda.is_available():  # prefer GPU if available
+    if not cpu and not mps and (has_musa or torch.cuda.is_available()) :  # prefer GPU if available
         devices = device.split(",") if device else "0"  # range(torch.cuda.device_count())  # i.e. 0,1,6,7
         n = len(devices)  # device count
         if n > 1 and batch_size > 0:  # check batch_size is divisible by device_count
             assert batch_size % n == 0, f"batch-size {batch_size} not multiple of GPU count {n}"
         space = " " * (len(s) + 1)
-        for i, d in enumerate(devices):
-            p = torch.cuda.get_device_properties(i)
-            s += f"{'' if i == 0 else space}CUDA:{d} ({p.name}, {p.total_memory / (1 << 20):.0f}MiB)\n"  # bytes to MB
-        arg = "cuda:0"
+
+        if has_musa:
+            for i, d in enumerate(devices):
+                p = torch.musa.get_device_properties(i)
+                s += f"{'' if i == 0 else space}MUSA:{d} ({p.name}, {p.total_memory / (1 << 20):.0f}MiB)\n"  # bytes to MB
+            arg = "musa:0"
+        else:
+            for i, d in enumerate(devices):
+                p = torch.cuda.get_device_properties(i)
+                s += f"{'' if i == 0 else space}CUDA:{d} ({p.name}, {p.total_memory / (1 << 20):.0f}MiB)\n"  # bytes to MB
+            arg = "cuda:0"
     elif mps and getattr(torch, "has_mps", False) and torch.backends.mps.is_available():  # prefer MPS if available
         s += "MPS\n"
         arg = "mps"
@@ -150,8 +170,12 @@ def select_device(device="", batch_size=0, newline=True):
 
 def time_sync():
     """Synchronizes PyTorch for accurate timing, leveraging CUDA if available, and returns the current time."""
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    if has_musa:
+        if torch.musa.is_available():
+            torch.musa.synchronize()
+    else:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
     return time.time()
 
 
@@ -196,7 +220,10 @@ def profile(input, ops, n=10, device=None):
                         t[2] = float("nan")
                     tf += (t[1] - t[0]) * 1000 / n  # ms per op forward
                     tb += (t[2] - t[1]) * 1000 / n  # ms per op backward
-                mem = torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0  # (GB)
+                if has_musa:
+                    mem = torch.musa.memory_reserved() / 1e9 if torch.musa.is_available() else 0  # (GB)
+                else:
+                    mem = torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0  # (GB)
                 s_in, s_out = (tuple(x.shape) if isinstance(x, torch.Tensor) else "list" for x in (x, y))  # shapes
                 p = sum(x.numel() for x in m.parameters()) if isinstance(m, nn.Module) else 0  # parameters
                 print(f"{p:12}{flops:12.4g}{mem:>14.3f}{tf:14.4g}{tb:14.4g}{str(s_in):>24s}{str(s_out):>24s}")
@@ -204,7 +231,10 @@ def profile(input, ops, n=10, device=None):
             except Exception as e:
                 print(e)
                 results.append(None)
-            torch.cuda.empty_cache()
+            if has_musa:
+                torch.musa.empty_cache()
+            else:
+                torch.cuda.empty_cache()
     return results
 
 
